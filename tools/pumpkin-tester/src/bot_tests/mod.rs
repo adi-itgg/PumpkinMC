@@ -1,3 +1,4 @@
+mod arrow_hits_player;
 mod block_tuning_and_invert;
 mod commands_and_gamemode;
 mod embedded_stop;
@@ -35,6 +36,8 @@ pub async fn run_bot_tests(
     loot_tables::run_loot_table_tests(server, &mut bot1, summary_lines).await?;
 
     world_interaction::run_world_interaction_tests(server, &mut bot1, summary_lines).await?;
+
+    arrow_hits_player::run_arrow_hits_player_test(server, &bot1, summary_lines).await?;
 
     sheep_shearing::run_sheep_shearing_test(server, summary_lines)?;
 

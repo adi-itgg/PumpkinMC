@@ -748,8 +748,14 @@ impl EntityBase for ArrowEntity {
             }
         }
 
-        // Entity collisions
-        let candidates = world.get_entities_at_box(&search_box);
+        // Entity collisions. `get_entities_at_box` excludes players, so add them explicitly.
+        let mut candidates = world.get_entities_at_box(&search_box);
+        candidates.extend(
+            world
+                .get_players_at_box(&search_box)
+                .into_iter()
+                .map(|player| player as Arc<dyn EntityBase>),
+        );
         for cand in candidates {
             if self.should_skip_collision(entity, &cand) {
                 continue;
@@ -1062,6 +1068,11 @@ impl ArrowEntity {
         }
 
         if !self.owner.can_hit(&self_ent.world.load(), other_ent) {
+            return true;
+        }
+
+        // Arrows pass through spectators, like vanilla `ProjectileUtil`.
+        if other.is_spectator() {
             return true;
         }
 
