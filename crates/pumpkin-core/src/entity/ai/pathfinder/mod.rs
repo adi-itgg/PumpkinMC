@@ -462,8 +462,15 @@ pub struct PathNavigation {
     pub max_visited_nodes_multiplier: f32,
     pub is_stuck: bool,
     pub required_path_length: f32,
+    /// The block the last search was charged against, `None` until the first
+    /// search. `needs_new_path` compares this against the current goal
+    /// because the path's own target can differ from what goals request when
+    /// below-surface destinations get raised to the surface.
+    requested_target: Option<Vector3<i32>>,
     pub path_type_overrides: FxHashMap<PathType, f32>,
     has_pending_path: bool,
+    pub mob_width: f32,
+    pub mob_height: f32,
     pub can_float: bool,
     pub can_walk_over_fences: bool,
     pub can_open_doors: bool,
@@ -512,8 +519,11 @@ impl PathNavigation {
             max_visited_nodes_multiplier: 1.0,
             is_stuck: false,
             required_path_length: 16.0,
+            requested_target: None,
             path_type_overrides: FxHashMap::default(),
             has_pending_path: false,
+            mob_width: 0.6,
+            mob_height: 1.95,
             can_float: false,
             can_walk_over_fences: false,
             can_open_doors: false,
@@ -526,6 +536,11 @@ impl PathNavigation {
         }
     }
 
+    /// Sets the navigation goal without discarding an in-progress path.
+    /// `tick_ground` re-evaluates through `needs_new_path` (with its cooldown
+    /// and the per-tick search budget): goals like `TemptGoal` re-issue
+    /// `set_progress` every tick, and nulling the path here would trigger a
+    /// full A* search every tick per mob.
     pub fn set_progress(&mut self, goal: NavigatorGoal) {
         self.is_idle.store(false, Ordering::Relaxed);
         self.speed_modifier = goal.speed;
@@ -635,7 +650,6 @@ impl PathNavigation {
         self.evaluator
             .set_can_walk_over_fences(self.can_walk_over_fences);
         self.evaluator.prepare(context, mob_data);
-
         world_change
     }
 
@@ -725,7 +739,11 @@ impl PathNavigation {
         {
             return Some(path.clone());
         }
+        let search_start = std::time::Instant::now();
         let path = self.compute_path(entity, target.0.to_f64(), reach_range);
+        world.add_path_search_time(
+            u64::try_from(search_start.elapsed().as_nanos()).unwrap_or(u64::MAX),
+        );
         if let Some(path) = &path {
             self.target_pos = Some(path.get_target());
             self.reach_range = reach_range;
@@ -755,7 +773,9 @@ impl PathNavigation {
             || !self.can_update_path(entity)
         {
             self.has_delayed_recomputation = true;
-        } else if let Some(target) = self.target_pos {
+        } else if entity.entity.world.load().can_start_path_search()
+            && let Some(target) = self.target_pos
+        {
             self.path = None;
             self.path = self.create_path(entity, target.0.to_f64(), self.reach_range);
             self.time_last_recompute = world_age;
@@ -763,7 +783,11 @@ impl PathNavigation {
         }
     }
 
-    fn update_path(&mut self, entity: &LivingEntity) {
+    /// Applies the pending `moveTo` goal and any delayed recompute. Returns
+    /// `true` when the search was postponed because this tick's time budget is
+    /// exhausted, so callers keep the navigation waiting instead of treating
+    /// the missing path as a finished route.
+    fn update_path(&mut self, entity: &LivingEntity) -> bool {
         if self.has_delayed_recomputation {
             self.recompute_path(entity);
         }
@@ -780,6 +804,24 @@ impl PathNavigation {
                 }
             }
         }
+        false
+    }
+
+    pub fn needs_new_path(&self, goal: &NavigatorGoal) -> bool {
+        if self.path.is_none() {
+            return true;
+        }
+        // vanilla `createPath` reuses the in-progress path only while it is
+        // not done and the requested target block is unchanged
+        // (`this.path != null && !this.path.isDone() && targets.contains(this.targetPos)`).
+        // The comparison uses the block the search was charged against, not
+        // the path's target node, because below-surface destinations are
+        // raised to the surface before searching.
+        self.requested_target.as_ref().is_none_or(|requested| {
+            self.path.as_ref().is_some_and(|p| {
+                p.is_done() || *requested != BlockPos::floored_v(goal.destination).0
+            })
+        })
     }
 
     pub fn can_move_directly(
@@ -1021,7 +1063,7 @@ impl PathNavigation {
     #[allow(clippy::too_many_lines)]
     pub fn tick_ground(&mut self, entity: &LivingEntity) -> Option<NavigationTarget> {
         self.tick_count += 1;
-        self.update_path(entity);
+        let search_denied = self.update_path(entity);
 
         if self.path.is_none() {
             self.stop();
@@ -1035,7 +1077,11 @@ impl PathNavigation {
             entity.entity.pos.load().z,
         );
 
-        self.do_stuck_detection(mob_pos, entity);
+        // A denied search leaves the navigation waiting for a slot
+        // without a path; the stuck check is about the following itself.
+        if !(search_denied && self.path.is_none()) {
+            self.do_stuck_detection(mob_pos, entity);
+        }
 
         if let Some(path) = &mut self.path {
             if path.is_done() {
@@ -1204,6 +1250,7 @@ impl PathNavigationTrait for GroundPathNavigation {
         self.inner.has_pending_path = false;
         self.inner.current_goal = None;
         if let Some(new_path) = path {
+            self.inner.requested_target = Some(new_path.get_target().0);
             self.inner.install_path(new_path, entity);
             if self.is_done() {
                 return false;
@@ -1399,7 +1446,7 @@ impl PathNavigationTrait for FlyingPathNavigation {
     #[allow(clippy::too_many_lines)]
     fn tick(&mut self, entity: &LivingEntity) -> Option<NavigationTarget> {
         self.inner.tick_count += 1;
-        self.inner.update_path(entity);
+        let search_denied = self.inner.update_path(entity);
 
         let mob_pos = entity.entity.pos.load();
         let can_update = self.inner.can_update_path(entity);
@@ -1440,7 +1487,9 @@ impl PathNavigationTrait for FlyingPathNavigation {
             if reached {
                 path.advance();
             }
-            if can_update {
+            // A postponed search leaves the navigation waiting for a slot without
+            // a path; the stuck check is about the following, not the waiting.
+            if can_update && !(search_denied && self.inner.path.is_none()) {
                 self.inner.do_stuck_detection(mob_pos, entity);
             }
         }
@@ -1483,6 +1532,7 @@ impl PathNavigationTrait for FlyingPathNavigation {
         self.inner.has_pending_path = false;
         self.inner.current_goal = None;
         if let Some(new_path) = path {
+            self.inner.requested_target = Some(new_path.get_target().0);
             self.inner.install_path(new_path, entity);
             if self.is_done() {
                 return false;
@@ -1674,8 +1724,8 @@ impl PathNavigationTrait for WaterBoundPathNavigation {
     #[allow(clippy::too_many_lines)]
     fn tick(&mut self, entity: &LivingEntity) -> Option<NavigationTarget> {
         self.inner.tick_count += 1;
-        self.inner.update_path(entity);
-        if self.is_done() {
+        let search_denied = self.inner.update_path(entity);
+        if self.is_done() && !search_denied {
             self.inner.stop();
             return None;
         }
@@ -1764,6 +1814,7 @@ impl PathNavigationTrait for WaterBoundPathNavigation {
         self.inner.has_pending_path = false;
         self.inner.current_goal = None;
         if let Some(new_path) = path {
+            self.inner.requested_target = Some(new_path.get_target().0);
             self.inner.install_path(new_path, entity);
             if self.is_done() {
                 return false;
@@ -1951,7 +2002,9 @@ impl PathNavigationTrait for WallClimberNavigation {
     #[allow(clippy::too_many_lines)]
     fn tick(&mut self, entity: &LivingEntity) -> Option<NavigationTarget> {
         if self.inner.inner.has_pending_path {
-            self.inner.inner.update_path(entity);
+            // The deferred-search signal only matters to callers that install a
+            // path themselves; this one falls through to `inner.tick`.
+            let _ = self.inner.inner.update_path(entity);
         }
         if !self.inner.is_done() {
             return self.inner.tick(entity);
@@ -2191,16 +2244,20 @@ impl PathNavigationTrait for AmphibiousPathNavigation {
     fn tick(&mut self, entity: &LivingEntity) -> Option<NavigationTarget> {
         if entity.entity.touching_water.load(Ordering::Relaxed) {
             self.inner.tick_count += 1;
-            self.inner.update_path(entity);
+            let search_denied = self.inner.update_path(entity);
 
             let mob_pos = Vector3::new(
                 entity.entity.pos.load().x,
                 entity.entity.pos.load().y + f64::from(entity.entity.height()) * 0.5,
                 entity.entity.pos.load().z,
             );
-            self.inner.do_stuck_detection(mob_pos, entity);
+            // A denied search leaves the navigation waiting for a slot
+            // without a path; the stuck check is about the following itself.
+            if !(search_denied && self.inner.path.is_none()) {
+                self.inner.do_stuck_detection(mob_pos, entity);
+            }
 
-            if self.is_done() {
+            if self.is_done() && !search_denied {
                 self.inner.stop();
             } else if let Some(path) = &mut self.inner.path
                 && let Some(pos) = path.get_next_node_pos()
@@ -2261,6 +2318,7 @@ impl PathNavigationTrait for AmphibiousPathNavigation {
         self.inner.has_pending_path = false;
         self.inner.current_goal = None;
         if let Some(new_path) = path {
+            self.inner.requested_target = Some(new_path.get_target().0);
             self.inner.install_path(new_path, entity);
             if self.is_done() {
                 return false;
