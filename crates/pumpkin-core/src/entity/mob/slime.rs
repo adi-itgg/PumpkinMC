@@ -495,13 +495,14 @@ impl Mob for SlimeEntity {
         0.0
     }
 
-    fn get_base_experience_reward(&self) -> u32 {
-        self.get_size() as u32
+    fn xp_reward(&self) -> u32 {
+        u32::try_from(self.get_size()).unwrap_or(0)
     }
 
     fn finalize_spawn(
         &self,
         _world: &Arc<World>,
+        _reason: crate::entity::mob::spawn::EntitySpawnReason,
         group_data: Option<super::spawn::SpawnGroupData>,
     ) -> Option<super::spawn::SpawnGroupData> {
         let group_data = self.finalize_ageable_spawn(group_data);

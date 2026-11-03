@@ -50,6 +50,10 @@ impl CustomSound for MagmaCubeEntity {
 }
 
 impl Mob for MagmaCubeEntity {
+    fn xp_reward(&self) -> u32 {
+        self.slime.xp_reward()
+    }
+
     fn as_cube_mob(&self) -> Option<&SlimeEntity> {
         Some(&self.slime)
     }
@@ -77,9 +81,10 @@ impl Mob for MagmaCubeEntity {
     fn finalize_spawn(
         &self,
         world: &Arc<World>,
+        reason: crate::entity::mob::spawn::EntitySpawnReason,
         group_data: Option<super::spawn::SpawnGroupData>,
     ) -> Option<super::spawn::SpawnGroupData> {
-        self.slime.finalize_spawn(world, group_data)
+        self.slime.finalize_spawn(world, reason, group_data)
     }
 
     fn mob_write_nbt(&self, nbt: &mut NbtCompound) {

@@ -18,10 +18,11 @@ use crate::world_info::{
     DataPacks, MAXIMUM_SUPPORTED_LEVEL_VERSION, MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
     MINIMUM_SUPPORTED_LEVEL_VERSION, MINIMUM_SUPPORTED_WORLD_DATA_VERSION, WorldVersion,
     data_files::{
-        minecraft_data_dir, read_game_rules, read_weather, read_world_clocks,
-        read_world_gen_settings, write_custom_boss_events_stub, write_game_rules,
-        write_random_sequences_stub, write_scheduled_events_stub, write_scoreboard_stub,
-        write_stopwatches_stub, write_weather, write_world_clocks, write_world_gen_settings,
+        minecraft_data_dir, read_game_rules, read_wandering_trader, read_weather,
+        read_world_clocks, read_world_gen_settings, write_custom_boss_events_stub,
+        write_game_rules, write_random_sequences_stub, write_scheduled_events_stub,
+        write_scoreboard_stub, write_stopwatches_stub, write_wandering_trader, write_weather,
+        write_world_clocks, write_world_gen_settings,
     },
     default_data_packs,
 };
@@ -284,6 +285,12 @@ fn level_data_from_nbt(data: &NbtCompound, seed: i64) -> LevelData {
     if let Some(clear_weather_time) = data.get_int("clearWeatherTime") {
         level_data.clear_weather_time = clear_weather_time;
     }
+    if let Some(spawn_delay) = data.get_int("WanderingTraderSpawnDelay") {
+        level_data.wandering_trader_spawn_delay = spawn_delay;
+    }
+    if let Some(spawn_chance) = data.get_int("WanderingTraderSpawnChance") {
+        level_data.wandering_trader_spawn_chance = spawn_chance;
+    }
 
     level_data
 }
@@ -415,6 +422,15 @@ impl WorldInfoReader for AnvilLevelInfo {
             level_data.clear_weather_time = weather.clear_weather_time;
         }
 
+        if minecraft_data_dir(level_folder)
+            .join("wandering_trader.dat")
+            .exists()
+        {
+            let wandering_trader = read_wandering_trader(level_folder);
+            level_data.wandering_trader_spawn_delay = wandering_trader.spawn_delay;
+            level_data.wandering_trader_spawn_chance = wandering_trader.spawn_chance;
+        }
+
         Ok(level_data)
     }
 }
@@ -491,6 +507,15 @@ impl WorldInfoWriter for AnvilLevelInfo {
         weather.data_version = data_version;
         if let Err(e) = write_weather(level_folder, &weather) {
             error!("Failed to write weather.dat: {e}");
+        }
+
+        // wandering_trader.dat
+        let mut wandering_trader = read_wandering_trader(level_folder);
+        wandering_trader.spawn_delay = info.wandering_trader_spawn_delay;
+        wandering_trader.spawn_chance = info.wandering_trader_spawn_chance;
+        wandering_trader.data_version = data_version;
+        if let Err(e) = write_wandering_trader(level_folder, &wandering_trader) {
+            error!("Failed to write wandering_trader.dat: {e}");
         }
 
         // custom_boss_events.dat
@@ -888,6 +913,8 @@ mod test {
             border_warning_blocks: 5.0,
             border_warning_time: 15.0,
             clear_weather_time: 0,
+            wandering_trader_spawn_delay: 24_000,
+            wandering_trader_spawn_chance: 25,
             data_packs: DataPacks {
                 disabled: vec![
                     "minecart_improvements".to_string(),
