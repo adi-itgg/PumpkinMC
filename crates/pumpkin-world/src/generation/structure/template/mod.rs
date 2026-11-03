@@ -51,7 +51,7 @@ pub use processor::{
 pub use pumpkin_data::{BlockState, Mirror as BlockMirror, Rotation as BlockRotation};
 pub use structure_template::{
     JigsawBlockInfo, Palette, PaletteEntry, SimplePalette, StructureBlockInfo, StructureEntityInfo,
-    StructurePlaceSettings, StructureTemplate, TemplateBlock, TemplateEntity,
+    StructurePlaceSettings, StructureTemplate, TemplateEntity,
 };
 pub use template_piece::TemplatePiece;
 
@@ -119,7 +119,7 @@ pub fn place_template_with_options(
     let mut context_rng = LegacyRand::from_seed(hash_block_pos(world_x, origin.y, world_z) as u64);
     let mut context = processor::ProcessorContext::new(origin, processors, &mut context_rng);
 
-    for block in &template.blocks {
+    for block in template.blocks() {
         // Rotate block position within template bounds
         let local_pos = rotation.transform_pos(block.pos, template.size);
 
@@ -138,28 +138,26 @@ pub fn place_template_with_options(
             continue;
         }
 
-        let palette_entry = &template.palette[block.state as usize];
+        let palette_entry = &block.state;
 
         // Structure blocks are data markers.
         if palette_entry.name == "minecraft:structure_block" {
             continue;
         }
 
-        let mut block_entity_nbt = block.nbt.clone();
-        let jigsaw_entry: PaletteEntry;
-        let placed_entry = if !keep_jigsaws && palette_entry.name == "minecraft:jigsaw" {
-            // Jigsaw blocks are replaced during template processing, before block entities are
-            // collected. Keeping this in the placement pipeline avoids stale jigsaw entities.
+        let mut block_entity_nbt = block.nbt.as_deref().cloned();
+        let mut placed_entry = PaletteEntry::clone(palette_entry);
+
+        // Jigsaw blocks are replaced during template processing, before block entities are
+        // collected. Keeping this in the placement pipeline avoids stale jigsaw entities.
+        if !keep_jigsaws && palette_entry.name == "minecraft:jigsaw" {
             let final_state = block_entity_nbt
                 .as_ref()
                 .and_then(|nbt| nbt.get_string("final_state"))
                 .unwrap_or("minecraft:air");
-            jigsaw_entry = PaletteEntry::from_string(final_state);
+            placed_entry = PaletteEntry::from_string(final_state);
             block_entity_nbt = None;
-            &jigsaw_entry
-        } else {
-            palette_entry
-        };
+        }
 
         // Structure void preserves the existing block, both from the palette itself and from a
         // jigsaw final state.
@@ -169,7 +167,7 @@ pub fn place_template_with_options(
 
         // Resolve block state with rotation applied to directional properties
         let Some(mut state) =
-            BlockStateResolver::resolve(placed_entry, rotation, Mirror::default())
+            BlockStateResolver::resolve(&placed_entry, rotation, Mirror::default())
         else {
             continue;
         };

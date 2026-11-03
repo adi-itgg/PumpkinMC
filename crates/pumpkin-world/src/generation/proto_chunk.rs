@@ -139,7 +139,8 @@ pub struct ProtoChunk {
     pub z: i32,
     pub default_block: &'static BlockState,
     biome_mixer_seed: i64,
-    pub(crate) flat_block_map: Vec<BlockStateId>,
+    /// One paletted section per 16 blocks of height, like vanilla's `LevelChunkSection[]`.
+    sections: Box<[BlockPalette]>,
     pub flat_biome_map: Box<[u8]>,
     pub flat_surface_height_map: [i16; CHUNK_AREA],
     pub flat_ocean_floor_height_map: [i16; CHUNK_AREA],
@@ -256,7 +257,9 @@ impl ProtoChunk {
             z,
             default_block,
             biome_mixer_seed,
-            flat_block_map: Vec::new(),
+            sections: (0..section_count)
+                .map(|_| BlockPalette::Homogeneous(BlockStateId::AIR))
+                .collect(),
             flat_biome_map: vec![
                 Biome::PLAINS.id;
                 biome_coords::from_block(CHUNK_DIM as i32) as usize
@@ -541,10 +544,7 @@ impl ProtoChunk {
             }
 
             for scan_local_y in (0..local_y).rev() {
-                let idx = Self::local_pos_to_block_index(local_x, scan_local_y, local_z);
-                let Some(&state_id) = self.flat_block_map.get(idx) else {
-                    continue;
-                };
+                let state_id = self.get_block_state_raw(local_x, scan_local_y, local_z);
                 if state_id == BlockStateId::AIR {
                     continue;
                 }
@@ -595,7 +595,9 @@ impl ProtoChunk {
 
     pub fn prime_heightmaps(&mut self) {
         let bottom_y = self.generation_bottom_y() as i32;
-        let max_populated_y = bottom_y + (self.flat_block_map.len() / CHUNK_AREA) as i32 - 1;
+        // Every section exists up front now, so the populated bound is the last one the chunk
+        // actually owns instead of a dynamically grown block vector.
+        let max_populated_y = bottom_y + (self.sections.len() * BlockPalette::SIZE) as i32 - 1;
         let top_y = (bottom_y + self.generation_height() as i32 - 1).min(max_populated_y);
         let default_y = (self.bottom_y() as i32 - 1) as i16;
 
@@ -619,10 +621,7 @@ impl ProtoChunk {
                 self.flat_motion_blocking_no_leaves_height_map[index] = default_y;
 
                 for y in (bottom_y..=col_top_y).rev() {
-                    let block_index = Self::local_pos_to_block_index(lx, y - bottom_y, lz);
-                    let Some(&state_id) = self.flat_block_map.get(block_index) else {
-                        continue;
-                    };
+                    let state_id = self.get_block_state_raw(lx, y - bottom_y, lz);
                     if state_id == BlockStateId::AIR {
                         continue;
                     }
@@ -715,14 +714,6 @@ impl ProtoChunk {
     }
 
     #[inline]
-    const fn local_pos_to_block_index(x: i32, y: i32, z: i32) -> usize {
-        ((y as usize) >> 4) * BlockPalette::VOLUME
-            + (x as usize) * CHUNK_AREA
-            + ((y as usize) & 15) * CHUNK_DIM as usize
-            + z as usize
-    }
-
-    #[inline]
     #[must_use]
     pub const fn local_biome_pos_to_biome_index(&self, x: i32, y: i32, z: i32) -> usize {
         let biome_height = self.height() as usize >> 2;
@@ -741,10 +732,16 @@ impl ProtoChunk {
     #[must_use]
     pub fn get_block_state_raw(&self, x: i32, y: i32, z: i32) -> BlockStateId {
         debug_assert!((0..i32::from(self.height())).contains(&y));
-        self.flat_block_map
-            .get(Self::local_pos_to_block_index(x, y, z))
-            .copied()
-            .unwrap_or(BlockStateId::AIR)
+        self.sections
+            .get(y as usize >> 4)
+            .map_or(BlockStateId::AIR, |section| {
+                section.get(x as usize, y as usize & 15, z as usize)
+            })
+    }
+
+    /// Moves the block sections out, leaving empty ones behind.
+    pub(crate) fn take_sections(&mut self) -> Box<[BlockPalette]> {
+        std::mem::take(&mut self.sections)
     }
 
     #[inline]
@@ -766,19 +763,12 @@ impl ProtoChunk {
             return;
         }
 
-        let index = Self::local_pos_to_block_index(local_x, local_y, local_z);
-        if index >= self.flat_block_map.len() {
-            if block_state.id == BlockStateId::AIR {
-                return;
-            }
-            let section_end = ((local_y as usize >> 4) + 1) * BlockPalette::VOLUME;
-            self.flat_block_map
-                .reserve_exact(section_end - self.flat_block_map.len());
-            self.flat_block_map.resize(section_end, BlockStateId::AIR);
-        } else if self.flat_block_map[index] == block_state.id {
-            return;
-        }
-        self.flat_block_map[index] = block_state.id;
+        self.sections[local_y as usize >> 4].set(
+            local_x as usize,
+            local_y as usize & 15,
+            local_z as usize,
+            block_state.id,
+        );
 
         let hm_index = Self::local_position_to_height_map_index(local_x, local_z);
         self.update_height_map_column(hm_index, local_x, local_y, local_z, y as i16, block_state);

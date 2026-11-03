@@ -176,7 +176,7 @@ impl TemplatePiece {
             .get_bounding_box(&self.place_settings, self.template_position);
         let box_limit = self.piece.bounding_box;
 
-        for block in &self.template.blocks {
+        for block in self.template.blocks() {
             // Transform position to world coordinates
             let world_pos = self.transform_pos(block.pos);
 
@@ -185,7 +185,7 @@ impl TemplatePiece {
                 continue;
             }
 
-            let palette_entry = &self.template.palette[block.state as usize];
+            let palette_entry = &block.state;
 
             // Structure blocks are data markers
             if palette_entry.name == "minecraft:structure_block" {
