@@ -119,6 +119,8 @@ pub struct PandaEntity {
 impl PandaEntity {
     pub fn new(entity: Entity) -> Arc<Self> {
         let mob_entity = MobEntity::new(entity);
+        // Vanilla only does this when not a baby, but the age is not loaded yet at this point.
+        mob_entity.set_can_pick_up_loot(true);
         let panda = Self {
             mob_entity,
             ageable_data: AgeableData::default(),
@@ -304,8 +306,6 @@ impl AgeableMob for PandaEntity {
 impl Animal for PandaEntity {
     fn is_food(&self, item_stack: &ItemStack) -> bool {
         item_stack.item.has_tag(&tag::Item::MINECRAFT_PANDA_FOOD)
-            || item_stack.item == &Item::BAMBOO
-            || item_stack.item == &Item::CAKE
     }
 
     fn get_breed_offspring(&self, partner: &dyn EntityBase) -> Arc<dyn EntityBase> {
@@ -339,6 +339,20 @@ impl Mob for PandaEntity {
 
     fn mob_play_step_sound(&self, _pos: &BlockPos, _state: &BlockState) {
         self.play_entity_sound(Sound::EntityPandaStep, 0.15, 1.0);
+    }
+
+    fn can_be_leashed(&self) -> bool {
+        false
+    }
+
+    fn get_ambient_sound(&self) -> Option<Sound> {
+        Some(if self.is_aggressive() {
+            Sound::EntityPandaAggressiveAmbient
+        } else if self.is_worried() {
+            Sound::EntityPandaWorriedAmbient
+        } else {
+            Sound::EntityPandaAmbient
+        })
     }
 
     fn as_ageable(&self) -> Option<&dyn AgeableMob> {
@@ -636,6 +650,36 @@ mod tests {
             }
         }
         assert!(weak_foals >= 20, "{weak_foals} weak foals out of 40");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn panda_rules_follow_vanilla() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let panda = panda(&world);
+
+        assert!(panda.is_food(&ItemStack::new(1, &Item::BAMBOO)));
+        assert!(!panda.is_food(&ItemStack::new(1, &Item::CAKE)));
+        assert!(!panda.can_be_leashed());
+        assert!(panda.mob_entity.can_pick_up_loot());
+
+        let ambient = |main_gene, hidden_gene| {
+            set_genes(&panda, main_gene, hidden_gene);
+            panda.get_ambient_sound()
+        };
+        assert_eq!(
+            ambient(PandaGene::Aggressive, PandaGene::Normal),
+            Some(Sound::EntityPandaAggressiveAmbient)
+        );
+        assert_eq!(
+            ambient(PandaGene::Worried, PandaGene::Normal),
+            Some(Sound::EntityPandaWorriedAmbient)
+        );
+        assert_eq!(
+            ambient(PandaGene::Brown, PandaGene::Weak),
+            Some(Sound::EntityPandaAmbient)
+        );
         Ok(())
     }
 }
