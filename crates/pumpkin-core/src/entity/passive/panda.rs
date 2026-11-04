@@ -4,6 +4,7 @@ use std::sync::{
 };
 
 use pumpkin_data::BlockState;
+use pumpkin_data::attributes::Attributes;
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::entity_variant::PandaGene;
 use pumpkin_data::item::Item;
@@ -23,10 +24,14 @@ use crate::entity::{
         look_around::RandomLookAroundGoal, look_at_entity::LookAtEntityGoal, swim::SwimGoal,
         tempt::TemptGoal, wander_around::WanderAroundGoal,
     },
-    mob::{Mob, MobEntity},
+    mob::{
+        Mob, MobEntity,
+        spawn::{EntitySpawnReason, SpawnGroupData},
+    },
     passive::animal::Animal,
     player::Player,
 };
+use crate::world::World;
 
 const TEMPT_ITEMS: &[&Item] = &[&Item::BAMBOO];
 
@@ -35,14 +40,29 @@ pub const FLAG_ROLL: u8 = 4;
 pub const FLAG_SIT: u8 = 8;
 pub const FLAG_ON_BACK: u8 = 16;
 
-fn random_gene() -> PandaGene {
-    let mut rng = rand::rng();
-    if rng.random_range(0..16) == 0 {
-        PandaGene::by_id(rng.random_range(4..=6))
-    } else if rng.random_range(0..8) == 0 {
-        PandaGene::by_id(rng.random_range(1..=3))
-    } else {
+const GENE_RANDOM_BOUND: i32 = 16;
+const WEAK_MAX_HEALTH: f32 = 10.0;
+const LAZY_MOVEMENT_SPEED: f32 = 0.07;
+
+/// A recessive main gene only shows when the hidden gene is the same one.
+fn get_variant_from_genes(main_gene: PandaGene, hidden_gene: PandaGene) -> PandaGene {
+    if main_gene.recessive() && main_gene != hidden_gene {
         PandaGene::Normal
+    } else {
+        main_gene
+    }
+}
+
+/// `next_int(bound)` stands for vanilla's `RandomSource.nextInt`.
+fn get_random_gene(mut next_int: impl FnMut(i32) -> i32) -> PandaGene {
+    match next_int(GENE_RANDOM_BOUND) {
+        0 => PandaGene::Lazy,
+        1 => PandaGene::Worried,
+        2 => PandaGene::Playful,
+        4 => PandaGene::Aggressive,
+        3 | 5..=8 => PandaGene::Weak,
+        9 | 10 => PandaGene::Brown,
+        _ => PandaGene::Normal,
     }
 }
 
@@ -60,13 +80,11 @@ pub struct PandaEntity {
 impl PandaEntity {
     pub fn new(entity: Entity) -> Arc<Self> {
         let mob_entity = MobEntity::new(entity);
-        let gene = random_gene();
-        let hidden = random_gene();
         let panda = Self {
             mob_entity,
             ageable_data: AgeableData::default(),
-            main_gene: AtomicI32::new(gene.id()),
-            hidden_gene: AtomicI32::new(hidden.id()),
+            main_gene: AtomicI32::new(PandaGene::Normal.id()),
+            hidden_gene: AtomicI32::new(PandaGene::Normal.id()),
             flags: AtomicU8::new(0),
             eat_counter: AtomicI32::new(0),
             sneeze_counter: AtomicI32::new(0),
@@ -123,6 +141,51 @@ impl PandaEntity {
             pumpkin_data::tracked_data::panda::HIDDEN_GENE_ID,
             gene.id() as i8,
         );
+    }
+
+    #[must_use]
+    pub fn get_variant(&self) -> PandaGene {
+        get_variant_from_genes(self.get_main_gene(), self.get_hidden_gene())
+    }
+
+    #[must_use]
+    pub fn is_lazy(&self) -> bool {
+        self.get_variant() == PandaGene::Lazy
+    }
+
+    #[must_use]
+    pub fn is_worried(&self) -> bool {
+        self.get_variant() == PandaGene::Worried
+    }
+
+    #[must_use]
+    pub fn is_playful(&self) -> bool {
+        self.get_variant() == PandaGene::Playful
+    }
+
+    #[must_use]
+    pub fn is_brown(&self) -> bool {
+        self.get_variant() == PandaGene::Brown
+    }
+
+    #[must_use]
+    pub fn is_weak(&self) -> bool {
+        self.get_variant() == PandaGene::Weak
+    }
+
+    #[must_use]
+    pub fn is_aggressive(&self) -> bool {
+        self.get_variant() == PandaGene::Aggressive
+    }
+
+    pub fn set_attributes(&self) {
+        let living = &self.mob_entity.living_entity;
+        if self.is_weak() {
+            living.set_max_health(WEAK_MAX_HEALTH);
+        }
+        if self.is_lazy() {
+            living.set_attribute_base(&Attributes::MOVEMENT_SPEED, f64::from(LAZY_MOVEMENT_SPEED));
+        }
     }
 
     #[must_use]
@@ -230,12 +293,30 @@ impl Mob for PandaEntity {
 
     fn mob_read_nbt(&self, nbt: &NbtCompound) {
         self.read_ageable_nbt(nbt);
-        if let Some(main) = nbt.get_string("MainGene") {
-            self.set_main_gene(PandaGene::from_name(main).unwrap_or(PandaGene::Normal));
-        }
-        if let Some(hidden) = nbt.get_string("HiddenGene") {
-            self.set_hidden_gene(PandaGene::from_name(hidden).unwrap_or(PandaGene::Normal));
-        }
+        self.set_main_gene(
+            nbt.get_string("MainGene")
+                .and_then(PandaGene::from_name)
+                .unwrap_or(PandaGene::Normal),
+        );
+        self.set_hidden_gene(
+            nbt.get_string("HiddenGene")
+                .and_then(PandaGene::from_name)
+                .unwrap_or(PandaGene::Normal),
+        );
+    }
+
+    fn finalize_spawn(
+        &self,
+        _world: &Arc<World>,
+        _reason: EntitySpawnReason,
+        group_data: Option<SpawnGroupData>,
+    ) -> Option<SpawnGroupData> {
+        let mut rng = self.get_random();
+        let mut next_int = |bound| rng.random_range(0..bound);
+        self.set_main_gene(get_random_gene(&mut next_int));
+        self.set_hidden_gene(get_random_gene(&mut next_int));
+        self.set_attributes();
+        self.finalize_spawn_super(group_data)
     }
 
     fn get_mob_entity(&self) -> &MobEntity {
@@ -276,5 +357,140 @@ impl Mob for PandaEntity {
 
     fn mob_interact(&self, player: &Arc<Player>, item_stack: &mut ItemStack) -> bool {
         self.animal_interact(player, item_stack)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::ai::test_support::world;
+    use pumpkin_util::math::vector3::Vector3;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn panda(world: &Arc<World>) -> Arc<PandaEntity> {
+        PandaEntity::new(Entity::new(
+            world.clone(),
+            Vector3::new(0.5, 64.0, 0.5),
+            &EntityType::PANDA,
+        ))
+    }
+
+    fn set_genes(panda: &PandaEntity, main_gene: PandaGene, hidden_gene: PandaGene) {
+        panda.set_main_gene(main_gene);
+        panda.set_hidden_gene(hidden_gene);
+    }
+
+    #[test]
+    fn random_gene_follows_vanilla_roll_table() {
+        let expected = [
+            PandaGene::Lazy,
+            PandaGene::Worried,
+            PandaGene::Playful,
+            PandaGene::Weak,
+            PandaGene::Aggressive,
+            PandaGene::Weak,
+            PandaGene::Weak,
+            PandaGene::Weak,
+            PandaGene::Weak,
+            PandaGene::Brown,
+            PandaGene::Brown,
+            PandaGene::Normal,
+            PandaGene::Normal,
+            PandaGene::Normal,
+            PandaGene::Normal,
+            PandaGene::Normal,
+        ];
+        for (roll, gene) in (0i32..).zip(expected) {
+            let mut asked_bound = 0;
+            let rolled = get_random_gene(|bound| {
+                asked_bound = bound;
+                roll
+            });
+            assert_eq!(rolled, gene, "roll {roll}");
+            assert_eq!(asked_bound, 16);
+        }
+    }
+
+    #[test]
+    fn recessive_main_gene_shows_only_with_matching_hidden_gene() {
+        let variant = get_variant_from_genes;
+        assert_eq!(
+            variant(PandaGene::Brown, PandaGene::Brown),
+            PandaGene::Brown
+        );
+        assert_eq!(variant(PandaGene::Weak, PandaGene::Weak), PandaGene::Weak);
+        assert_eq!(
+            variant(PandaGene::Brown, PandaGene::Weak),
+            PandaGene::Normal
+        );
+        assert_eq!(
+            variant(PandaGene::Weak, PandaGene::Normal),
+            PandaGene::Normal
+        );
+        // A dominant main gene ignores the hidden one, and a recessive hidden gene never shows.
+        assert_eq!(variant(PandaGene::Lazy, PandaGene::Brown), PandaGene::Lazy);
+        assert_eq!(
+            variant(PandaGene::Normal, PandaGene::Weak),
+            PandaGene::Normal
+        );
+    }
+
+    #[tokio::test]
+    async fn weak_variant_halves_health_and_lazy_variant_slows_down() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let default_speed = panda(&world)
+            .mob_entity
+            .living_entity
+            .get_attribute_value(&Attributes::MOVEMENT_SPEED);
+
+        let weak = panda(&world);
+        set_genes(&weak, PandaGene::Weak, PandaGene::Weak);
+        weak.set_attributes();
+        let living = &weak.mob_entity.living_entity;
+        assert!((living.get_max_health() - 10.0).abs() < f32::EPSILON);
+        assert!((living.health.load() - 10.0).abs() < f32::EPSILON);
+        assert!(
+            (living.get_attribute_value(&Attributes::MOVEMENT_SPEED) - default_speed).abs() < 1e-9
+        );
+
+        let lazy = panda(&world);
+        set_genes(&lazy, PandaGene::Lazy, PandaGene::Normal);
+        lazy.set_attributes();
+        let living = &lazy.mob_entity.living_entity;
+        assert!((living.get_attribute_value(&Attributes::MOVEMENT_SPEED) - 0.07).abs() < 1e-6);
+        assert!((living.get_max_health() - 20.0).abs() < f32::EPSILON);
+
+        // A hidden recessive gene does not make the panda weak.
+        let carrier = panda(&world);
+        set_genes(&carrier, PandaGene::Weak, PandaGene::Normal);
+        carrier.set_attributes();
+        assert!((carrier.mob_entity.living_entity.get_max_health() - 20.0).abs() < f32::EPSILON);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn genes_round_trip_through_nbt_and_default_to_normal() -> TestResult {
+        let folder = tempfile::tempdir()?;
+        let world = world(&folder);
+        let source = panda(&world);
+        set_genes(&source, PandaGene::Brown, PandaGene::Weak);
+        let mut nbt = NbtCompound::new();
+        source.write_custom_nbt(&mut nbt);
+        assert_eq!(nbt.get_string("MainGene"), Some("brown"));
+        assert_eq!(nbt.get_string("HiddenGene"), Some("weak"));
+
+        let loaded = panda(&world);
+        set_genes(&loaded, PandaGene::Lazy, PandaGene::Lazy);
+        loaded.read_custom_nbt(&nbt);
+        assert_eq!(loaded.get_main_gene(), PandaGene::Brown);
+        assert_eq!(loaded.get_hidden_gene(), PandaGene::Weak);
+
+        set_genes(&loaded, PandaGene::Weak, PandaGene::Brown);
+        loaded.read_custom_nbt(&NbtCompound::new());
+        assert_eq!(loaded.get_main_gene(), PandaGene::Normal);
+        assert_eq!(loaded.get_hidden_gene(), PandaGene::Normal);
+        Ok(())
     }
 }
