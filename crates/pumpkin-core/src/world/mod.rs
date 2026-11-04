@@ -190,11 +190,15 @@ pub use pumpkin_data::environment_attribute::{Activity, MoonPhase};
 use crate::world::natural_spawner::{SpawnState, spawn_for_chunk};
 use pumpkin_config::lighting::LightingEngineConfig;
 use pumpkin_data::effect::StatusEffect;
-use pumpkin_world::chunk::ChunkHeightmapType::{self, MotionBlocking};
+use pumpkin_world::chunk::ChunkHeightmapType::{self, MotionBlocking, WorldSurface};
 use uuid::Uuid;
 use weather::Weather;
 
 const MAX_LIGHT_LEVEL: u8 = 15;
+const POI_TYPE_LIGHTNING_ROD: &str = "minecraft:lightning_rod";
+const LIGHTNING_ROD_SEARCH_RADIUS: i32 = 128;
+pub(crate) const POI_TYPE_MEETING: &str = "minecraft:meeting";
+const MEETING_MAX_TICKETS: i32 = 32;
 
 fn bedrock_chest_block_actor(state_id: BlockStateId, position: BlockPos) -> Option<NbtCompound> {
     crate::block::entities::chest_like_block_entity::build_chest_actor(position, state_id, None)
@@ -1458,13 +1462,26 @@ impl World {
         category: SoundCategory,
         position: &Vector3<f64>,
     ) {
+        self.play_sound_event_fine(sound, category, position, 1.0, 1.0);
+    }
+
+    pub fn play_sound_event_fine(
+        &self,
+        sound: &pumpkin_data::data_component_impl::IdOr<
+            pumpkin_data::data_component_impl::SoundEvent,
+        >,
+        category: SoundCategory,
+        position: &Vector3<f64>,
+        volume: f32,
+        pitch: f32,
+    ) {
         let seed = rng().random::<i64>();
         let packet = CSoundEffect::new(
             data_to_proto_sound(sound),
             category,
             position,
-            1.0,
-            1.0,
+            volume,
+            pitch,
             seed,
         );
         self.broadcast_sound_in_range(&packet, position, sound_event_audible_chunks(sound), None);
@@ -1809,6 +1826,9 @@ impl World {
 
             entity.get_entity().tick_count.fetch_add(1, Relaxed);
             entity.tick(entity.as_ref(), server_ref);
+            // Riders may tick before or after their vehicle, so both ends re-seat them.
+            crate::entity::ride_tick(entity.as_ref());
+            crate::entity::position_riders(entity.as_ref());
 
             let entity_inner = entity.get_entity();
             let entity_pos = entity_inner.pos.load();
@@ -2686,53 +2706,11 @@ impl World {
         spawn_list: &Vec<&'static MobCategory>,
         spawn_state: &Arc<SpawnState>,
     ) {
-        // this.level.tickThunder(chunk);
         //TODO check in simulation distance
         let (is_raining, is_thundering) = (self.is_raining(), self.is_thundering());
 
         if is_raining && is_thundering && rng().random_range(0..100_000) == 0 {
-            let rand_value = rng().random::<i32>() >> 2;
-            let delta = Vector3::new(rand_value & 15, rand_value >> 16 & 15, rand_value >> 8 & 15);
-            let random_pos = Vector3::new(
-                chunk_pos.x << 4,
-                chunk
-                    .heightmap
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(
-                        MotionBlocking,
-                        chunk_pos.x << 4,
-                        chunk_pos.y << 4,
-                        self.min_y,
-                    ),
-                chunk_pos.y << 4,
-            )
-            .add(&delta);
-            // TODO this.getBrightness(LightLayer.SKY, blockPos) >= 15;
-            // TODO heightmap
-
-            // TODO findLightningRod(blockPos)
-            // TODO encapsulatingFullBlocks
-            if true {
-                // TODO biome.getPrecipitationAt(pos, this.getSeaLevel()) == Biome.Precipitation.RAIN
-                // TODO this.getCurrentDifficultyAt(blockPos);
-                if rng().random::<f32>() < 0.0675
-                    && self.get_block(&random_pos.to_block_pos().down()) != &Block::LIGHTNING_ROD
-                {
-                    let entity = Entity::new(
-                        self.clone(),
-                        random_pos.to_f64(),
-                        &EntityType::SKELETON_HORSE,
-                    );
-                    self.spawn_entity_non_save(Arc::new(entity));
-                }
-                let entity = Entity::new(
-                    self.clone(),
-                    random_pos.to_f64().add_raw(0.5, 0., 0.5),
-                    &EntityType::LIGHTNING_BOLT,
-                );
-                self.spawn_entity_non_save(Arc::new(entity));
-            }
+            self.tick_thunder(chunk_pos);
         }
 
         if spawn_list.is_empty() {
@@ -2747,6 +2725,115 @@ impl World {
             spawn_list,
             is_thundering,
         );
+    }
+
+    fn tick_thunder(self: &Arc<Self>, chunk_pos: Vector2<i32>) {
+        let rand_value = rng().random::<i32>() >> 2;
+        let random_pos = BlockPos(Vector3::new(
+            (chunk_pos.x << 4) + (rand_value & 15),
+            (rand_value >> 16) & 15,
+            (chunk_pos.y << 4) + ((rand_value >> 8) & 15),
+        ));
+        let pos = self.find_lightning_target_around(random_pos);
+        if !self.is_raining_at(&pos) {
+            return;
+        }
+        let difficulty = crate::entity::mob::equipment::RegionalDifficulty::at(self, pos.to_f64());
+        let is_trap = self.level_info.load().game_rules.spawn_mobs
+            && rng().random::<f64>() < f64::from(difficulty.effective_difficulty) * 0.01
+            && !pumpkin_data::tag::Taggable::has_tag(
+                self.get_block(&pos.down()),
+                &pumpkin_data::tag::Block::MINECRAFT_LIGHTNING_RODS,
+            );
+        if is_trap {
+            let horse = crate::entity::r#type::from_type(
+                &EntityType::SKELETON_HORSE,
+                Vector3::new(f64::from(pos.0.x), f64::from(pos.0.y), f64::from(pos.0.z)),
+                self,
+                uuid::Uuid::new_v4(),
+            );
+            if let Some(skeleton_horse) =
+                horse
+                    .cast_any()
+                    .downcast_ref::<crate::entity::passive::skeleton_horse::SkeletonHorseEntity>()
+            {
+                skeleton_horse.set_trap(true);
+                crate::entity::ageable::AgeableMob::set_age(skeleton_horse, 0);
+            }
+            self.spawn_entity(horse);
+        }
+        let bolt = crate::entity::r#type::from_type(
+            &EntityType::LIGHTNING_BOLT,
+            pos.to_f64().add_raw(0.5, 0.0, 0.5),
+            self,
+            uuid::Uuid::new_v4(),
+        );
+        if let Some(lightning) = bolt
+            .cast_any()
+            .downcast_ref::<crate::entity::lightning::LightningBoltEntity>()
+        {
+            lightning.set_visual_only(is_trap);
+        }
+        self.spawn_entity(bolt);
+    }
+
+    fn find_lightning_target_around(&self, pos: BlockPos) -> BlockPos {
+        let mut center = BlockPos(Vector3::new(
+            pos.0.x,
+            self.get_heightmap_height(MotionBlocking, pos.0.x, pos.0.z) + 1,
+            pos.0.z,
+        ));
+        if let Some(rod) = self.find_lightning_rod(center) {
+            return rod;
+        }
+        let max_y = self.dimension.min_y + self.dimension.height - 1;
+        let search = BoundingBox::new(
+            Vector3::new(
+                f64::from(center.0.x),
+                f64::from(center.0.y),
+                f64::from(center.0.z),
+            ),
+            Vector3::new(
+                f64::from(center.0.x + 1),
+                f64::from(max_y + 2),
+                f64::from(center.0.z + 1),
+            ),
+        )
+        .expand(3.0, 3.0, 3.0);
+        let mut targets: Vec<BlockPos> = self
+            .get_entities_at_box(&search)
+            .iter()
+            .filter_map(|entity| entity.get_living_entity().map(|_| entity.get_entity()))
+            .chain(
+                self.get_players_at_box(&search)
+                    .iter()
+                    .map(|player| &player.living_entity.entity),
+            )
+            .filter(|entity| entity.is_alive() && self.can_see_sky(&entity.block_pos.load()))
+            .map(|entity| entity.block_pos.load())
+            .collect();
+        if !targets.is_empty() {
+            return targets.swap_remove(rng().random_range(0..targets.len()));
+        }
+        if center.0.y == self.dimension.min_y - 1 {
+            center = center.up_height(2);
+        }
+        center
+    }
+
+    fn find_lightning_rod(&self, center: BlockPos) -> Option<BlockPos> {
+        let (rod, _) = self
+            .portal_poi
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .find_closest_where(center, LIGHTNING_ROD_SEARCH_RADIUS, |poi_type, rod_pos| {
+                poi_type == POI_TYPE_LIGHTNING_ROD
+                    && rod_pos.squared_distance(&center)
+                        <= LIGHTNING_ROD_SEARCH_RADIUS * LIGHTNING_ROD_SEARCH_RADIUS
+                    && rod_pos.0.y
+                        == self.get_heightmap_height(WorldSurface, rod_pos.0.x, rod_pos.0.z)
+            })?;
+        Some(rod.up())
     }
 
     pub fn get_world_age(&self) -> i64 {
@@ -5178,6 +5265,25 @@ impl World {
         let Some(mob) = vehicle.get_mob() else {
             return;
         };
+        if let Some(own_vehicle) = mob.get_mob_entity().take_pending_vehicle() {
+            // Taken first so this mob mounts before the vehicle's other riders.
+            let riders = own_vehicle
+                .get_mob()
+                .map(|vehicle| vehicle.get_mob_entity().take_pending_riders())
+                .unwrap_or_default();
+            own_vehicle.init_data_tracker();
+            self.add_entity_silent(own_vehicle.clone());
+            own_vehicle
+                .get_entity()
+                .add_passenger(own_vehicle.clone(), vehicle.clone());
+            for rider in riders {
+                rider.init_data_tracker();
+                self.add_entity_silent(rider.clone());
+                own_vehicle
+                    .get_entity()
+                    .add_passenger(own_vehicle.clone(), rider);
+            }
+        }
         for rider in mob.get_mob_entity().take_pending_riders() {
             rider.init_data_tracker();
             self.add_entity_silent(rider.clone());
@@ -5278,6 +5384,20 @@ impl World {
             return;
         }
         base_entity.removed.store(true, Ordering::Release);
+
+        if let Some(vehicle) = base_entity.get_vehicle() {
+            vehicle
+                .get_entity()
+                .remove_passenger_on_disconnect(base_entity.entity_id);
+        }
+        let passengers = base_entity
+            .passengers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for passenger in passengers {
+            base_entity.remove_passenger(passenger.get_entity().entity_id);
+        }
 
         self.spawn_state.load().remove_entity(self, entity);
         self.entity_tracker.remove_entity(entity, self);
@@ -5459,6 +5579,32 @@ impl World {
 
     /// Everything `set_block_state` does after the chunk write: callbacks, neighbour updates,
     /// client sync, POI and lighting.
+    fn update_block_poi(&self, position: &BlockPos, old_block: &Block, new_block: &Block) {
+        let mut poi = self
+            .portal_poi
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if villager_poi::profession_for_block(old_block).is_some()
+            || old_block == &Block::BELL
+            || pumpkin_data::tag::Taggable::has_tag(
+                old_block,
+                &pumpkin_data::tag::Block::MINECRAFT_LIGHTNING_RODS,
+            )
+        {
+            poi.remove(position);
+        }
+        if let Some(poi_type) = villager_poi::poi_type_for_block(new_block) {
+            poi.add_with_free_tickets(*position, poi_type, 1);
+        } else if pumpkin_data::tag::Taggable::has_tag(
+            new_block,
+            &pumpkin_data::tag::Block::MINECRAFT_LIGHTNING_RODS,
+        ) {
+            poi.add_with_free_tickets(*position, POI_TYPE_LIGHTNING_ROD, 0);
+        } else if new_block == &Block::BELL {
+            poi.add_with_free_tickets(*position, POI_TYPE_MEETING, MEETING_MAX_TICKETS);
+        }
+    }
+
     fn on_block_state_set(
         self: &Arc<Self>,
         position: &BlockPos,
@@ -5550,16 +5696,7 @@ impl World {
                 .update_block(*position, new_block);
 
             if is_new_block {
-                let mut poi = self
-                    .portal_poi
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if villager_poi::poi_type_for_block(old_block).is_some() {
-                    poi.remove(position);
-                }
-                if let Some(poi_type) = villager_poi::poi_type_for_block(new_block) {
-                    poi.add_with_free_tickets(*position, poi_type, 1);
-                }
+                self.update_block_poi(position, old_block, new_block);
             }
         }
 

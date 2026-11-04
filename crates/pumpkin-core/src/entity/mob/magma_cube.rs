@@ -103,6 +103,14 @@ impl Mob for MagmaCubeEntity {
         self.slime.get_mob_entity()
     }
 
+    fn mob_passenger_attachment_point(
+        &self,
+        passenger: &dyn crate::entity::EntityBase,
+        index: usize,
+    ) -> Option<pumpkin_util::math::vector3::Vector3<f64>> {
+        self.slime.mob_passenger_attachment_point(passenger, index)
+    }
+
     fn mob_metadata(&self) -> Option<crate::entity::mob::MobMetadata> {
         self.slime.mob_metadata()
     }
@@ -187,7 +195,9 @@ mod tests {
         let living = &cube.get_mob_entity().living_entity;
         cube.slime.set_size(4, true);
         assert!(
-            (living.get_damage_after_armor_absorb(10.0, &DamageType::MOB_ATTACK, None) - 7.2).abs()
+            (living.get_damage_after_armor_absorb(&*cube, 10.0, &DamageType::MOB_ATTACK, None)
+                - 7.2)
+                .abs()
                 < 1.0e-6
         );
         living
@@ -199,17 +209,21 @@ mod tests {
                 ItemStack::new(1, &Item::DIAMOND_CHESTPLATE),
             );
         assert!(
-            (living.get_damage_after_armor_absorb(10.0, &DamageType::MOB_ATTACK, None) - 3.6).abs()
+            (living.get_damage_after_armor_absorb(&*cube, 10.0, &DamageType::MOB_ATTACK, None)
+                - 3.6)
+                .abs()
                 < 1.0e-6
         );
         cube.slime.set_size(127, true);
         assert_eq!(living.health.load(), 1024.0);
         assert!(
-            (living.get_damage_after_armor_absorb(10.0, &DamageType::MOB_ATTACK, None) - 2.0).abs()
+            (living.get_damage_after_armor_absorb(&*cube, 10.0, &DamageType::MOB_ATTACK, None)
+                - 2.0)
+                .abs()
                 < 1.0e-6
         );
         assert_eq!(
-            living.get_damage_after_armor_absorb(10.0, &DamageType::GENERIC, None),
+            living.get_damage_after_armor_absorb(&*cube, 10.0, &DamageType::GENERIC, None),
             10.0
         );
         world.level.shutdown().await;
