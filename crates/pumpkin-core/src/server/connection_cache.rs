@@ -42,41 +42,32 @@ pub struct CachedStatus {
 
 pub struct CachedBranding {
     /// Cached server brand buffer so we don't have to rebuild them every time a player joins
-    cached_server_brand: &'static [u8],
+    cached_server_brand: Vec<u8>,
 }
 
 impl Default for CachedBranding {
     fn default() -> Self {
-        Self::new()
+        Self::new(&pumpkin_config::JavaConfig::default().brand)
     }
 }
 
 impl CachedBranding {
-    const BRAND: &'static str = "Pumpkin";
-    const BRAND_BYTES: &'static [u8] = &{
-        let brand = Self::BRAND.as_bytes();
-        let len = brand.len();
-        assert!(len < 128, "Brand length must fit in 1-byte VarInt");
-        let mut bytes = [0u8; 1 + Self::BRAND.len()];
-        bytes[0] = len as u8;
-        let mut i = 0;
-        while i < len {
-            bytes[i + 1] = brand[i];
-            i += 1;
-        }
-        bytes
-    };
-
+    /// Encodes `brand` with the one-byte `VarInt` length prefix the brand plugin message expects.
     #[must_use]
-    pub const fn new() -> Self {
+    pub fn new(brand: &str) -> Self {
+        let brand = brand.as_bytes();
+        debug_assert!(brand.len() < 128, "Brand length must fit in 1-byte VarInt");
+        let mut cached_server_brand = Vec::with_capacity(1 + brand.len());
+        cached_server_brand.push(brand.len() as u8);
+        cached_server_brand.extend_from_slice(brand);
         Self {
-            cached_server_brand: Self::BRAND_BYTES,
+            cached_server_brand,
         }
     }
 
     #[must_use]
-    pub const fn get_branding(&self) -> CPluginMessage<'_> {
-        CPluginMessage::new("minecraft:brand", self.cached_server_brand)
+    pub fn get_branding(&self) -> CPluginMessage<'_> {
+        CPluginMessage::new("minecraft:brand", &self.cached_server_brand)
     }
 }
 
@@ -226,10 +217,32 @@ impl CachedStatus {
 
 impl Default for CachedStatus {
     fn default() -> Self {
-        Self::new(
-            &BasicConfiguration::default(),
-            "A blazingly fast Pumpkin server!",
-            1000,
-        )
+        let java = pumpkin_config::JavaConfig::default();
+        Self::new(&BasicConfiguration::default(), &java.motd, java.max_players)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The brand payload is a one-byte `VarInt` length followed by the UTF-8 brand bytes.
+    #[test]
+    fn branding_payload_is_length_prefixed_varint() {
+        let branding = CachedBranding::new("Pumpkin");
+        let message = branding.get_branding();
+        assert_eq!(message.channel, "minecraft:brand");
+        assert_eq!(message.data, b"\x07Pumpkin");
+    }
+
+    #[test]
+    fn branding_uses_the_configured_value() {
+        let config = pumpkin_config::JavaConfig {
+            brand: "Custom Brand".to_string(),
+            ..pumpkin_config::JavaConfig::default()
+        };
+        let branding = CachedBranding::new(&config.brand);
+        let message = branding.get_branding();
+        assert_eq!(message.data, b"\x0cCustom Brand");
     }
 }

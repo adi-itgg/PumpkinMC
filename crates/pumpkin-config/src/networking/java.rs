@@ -32,6 +32,10 @@ pub struct JavaConfig {
     pub compression: CompressionConfig,
     /// Message of the Day; the server's description displayed on the status screen.
     pub motd: String,
+    /// Server brand sent to Java Edition clients in the `minecraft:brand` plugin message
+    /// and shown in the client's debug (F3) screen. Must be at most 127 bytes in UTF-8
+    /// so it fits the plugin message's one-byte `VarInt` length prefix.
+    pub brand: String,
     /// Authentication settings for client connections.
     pub authentication: AuthenticationConfig,
     /// Packet rate limiting settings.
@@ -56,6 +60,7 @@ impl Default for JavaConfig {
             keep_alive_time: 15,
             compression: CompressionConfig::default(),
             motd: "A blazingly fast Pumpkin server!".to_string(),
+            brand: "Pumpkin".to_string(),
             authentication: AuthenticationConfig::default(),
             packet_limiter: PacketLimiterConfig::default(),
         }
@@ -70,6 +75,18 @@ mod tests {
     fn default_keep_alive_time() {
         let config = JavaConfig::default();
         assert_eq!(config.keep_alive_time, 15);
+    }
+
+    #[test]
+    fn default_brand() {
+        let config = JavaConfig::default();
+        assert_eq!(config.brand, "Pumpkin");
+    }
+
+    #[test]
+    fn brand_is_configurable() {
+        let config: JavaConfig = toml::from_str(r#"brand = "My Server""#).unwrap();
+        assert_eq!(config.brand, "My Server");
     }
 
     #[test]

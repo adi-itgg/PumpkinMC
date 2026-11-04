@@ -112,6 +112,11 @@ impl LoadConfiguration for PumpkinConfig {
             self.advanced.networking.java.view_distance >= min_vd,
             "Java View distance must be at least 2"
         );
+        // The brand is written behind a one-byte VarInt length prefix in the plugin message.
+        assert!(
+            self.advanced.networking.java.brand.len() < 128,
+            "Java server brand must be shorter than 128 bytes"
+        );
         assert!(
             self.advanced.networking.java.view_distance <= max_vd,
             "Java View distance must be less than 64"
