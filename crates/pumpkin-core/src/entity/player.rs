@@ -1731,21 +1731,7 @@ impl Player {
             self.trigger_advancement(crate::entity::player::advancement::trigger::AdvancementTrigger::DealtOverkillDamage);
         }
 
-        if let Some(enchantments) = item_stack.get_data_component::<EnchantmentsImpl>() {
-            for (enchantment, level) in enchantments.enchantment.iter() {
-                for post_effect in enchantment.get_post_attack_effects() {
-                    if post_effect.affected
-                        == Some(pumpkin_data::enchantment::EnchantmentTarget::Victim)
-                        && let pumpkin_data::enchantment::EnchantmentEntityEffect::Ignite {
-                            duration,
-                        } = &post_effect.effect
-                    {
-                        let duration_seconds = duration.calculate(*level);
-                        victim_entity.set_on_fire_for_ticks((duration_seconds * 20.0) as u32);
-                    }
-                }
-            }
-        }
+        crate::enchantment::EnchantmentHelper::on_post_attack(victim_entity, &item_stack);
 
         if is_mace_smash {
             let fall_distance = self.living_entity.fall_distance.load();
@@ -5051,10 +5037,8 @@ impl Player {
             let pos_f64 = self.living_entity.entity.pos.load();
 
             let village_pos = world
-                .villager_poi
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get_nearest_job_site(player_pos, 64)
+                .is_village(&player_pos)
+                .then_some(player_pos)
                 .or_else(|| {
                     world.raids.try_lock().ok().and_then(|raids| {
                         raids

@@ -328,7 +328,6 @@ impl SlimeEntity {
                 (rand::random::<f32>() - rand::random::<f32>()) * 0.2 + 1.0,
             );
             crate::enchantment::EnchantmentHelper::on_post_attack(
-                self.get_entity(),
                 target.get_entity(),
                 &living.held_item(caller),
             );
@@ -336,6 +335,7 @@ impl SlimeEntity {
     }
 
     pub fn check_slime_spawn_rules(
+        entity_type: &'static EntityType,
         world: &World,
         pos: &BlockPos,
         reason: EntitySpawnReason,
@@ -344,7 +344,7 @@ impl SlimeEntity {
             return false;
         }
         if reason.is_spawner() {
-            return MobEntity::check_mob_spawn_rules(world, pos, reason);
+            return MobEntity::check_mob_spawn_rules(entity_type, world, pos, reason);
         }
 
         // Swamp/Surface Spawning
@@ -378,7 +378,7 @@ impl SlimeEntity {
 
         let mut rng = rand::rng();
         if rng.random_range(0..10) == 0 && slime_rand.next_bounded_i32(10) == 0 && pos.0.y < 40 {
-            return MobEntity::check_mob_spawn_rules(world, pos, reason);
+            return MobEntity::check_mob_spawn_rules(entity_type, world, pos, reason);
         }
 
         false

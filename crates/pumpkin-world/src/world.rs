@@ -81,7 +81,7 @@ pub trait WorldPortalExt: Send + Sync {
         chunk_z: i32,
     );
 
-    fn spawn_structure_entities(&self, _entities: Vec<StructureEntity>) {}
+    fn spawn_structure_entities(&self, _entities: Vec<(StructureEntity, &'static Biome)>) {}
 }
 
 pub trait BlockAccessor: Send + Sync {
